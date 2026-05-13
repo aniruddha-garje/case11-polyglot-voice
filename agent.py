@@ -17,7 +17,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, llm
+from livekit.agents import Agent, AgentSession, JobContext, TurnHandlingOptions, WorkerOptions, cli, llm
 from livekit.plugins import openai, silero
 
 from plugins.language_router import LanguageRouter
@@ -47,8 +47,15 @@ async def entrypoint(ctx: JobContext):
     language_router = LanguageRouter()
     latency_tracker = LatencyTracker()
 
-    # --- VAD: Silero (detects end-of-speech) ---
-    vad = silero.VAD.load()
+    # --- VAD: Silero at 8000 Hz to reduce CPU load ---
+    # Default 16000 Hz causes "inference slower than realtime" on Intel i5.
+    # 8000 Hz halves the computation with negligible accuracy loss for VAD.
+    vad = silero.VAD.load(
+        sample_rate=8000,
+        min_silence_duration=0.8,       # wait 800ms of silence before end-of-turn
+        min_speech_duration=0.1,        # ignore very short sounds (clicks, noise)
+        activation_threshold=0.6,       # slightly higher threshold = less false positives
+    )
 
     # --- STT: faster-whisper with language detection ---
     whisper_stt = WhisperSTT(
@@ -78,6 +85,18 @@ async def entrypoint(ctx: JobContext):
         stt=whisper_stt,
         llm=ollama_llm,
         tts=multilingual_tts,
+        turn_handling=TurnHandlingOptions(
+            endpointing={
+                "min_delay": 0.8,   # wait at least 800ms of silence before ending turn
+                "max_delay": 6.0,   # don't wait more than 6s (handles long pauses mid-sentence)
+            },
+            interruption={
+                "enabled": True,
+                "min_duration": 1.0,    # need at least 1s of speech to interrupt
+                "min_words": 2,         # need at least 2 words (reduces noise triggers)
+                "false_interruption_timeout": 3.0,  # 3s before classifying as false interrupt
+            },
+        ),
     )
 
     # --- Hook: after STT transcription, sync language to TTS ---

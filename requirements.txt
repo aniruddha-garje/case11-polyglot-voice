@@ -29,7 +29,7 @@ pyttsx3>=2.90
 sounddevice>=0.4.6
 numpy>=1.24.0
 scipy>=1.10.0
-soundfile>=0.12.1
+soundfile>=0.12.1      # needed by pyttsx3 Hindi path (save_to_file → read back)
 
 # --- Utilities ---
 python-dotenv>=1.0.0
