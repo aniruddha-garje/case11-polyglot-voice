@@ -1,0 +1,37 @@
+# ============================================================
+# Case 11: Polyglot Voice Companion — Python dependencies
+# Python 3.11 recommended. Run setup.bat (Windows) or setup.sh (Linux/Mac).
+# ============================================================
+
+# --- LiveKit Agents framework (Apache 2.0) ---
+livekit-agents[silero,openai,turn-detector]>=1.0.0,<2.0.0
+
+# Explicit plugin packages (in case extras don't pull them)
+livekit-plugins-silero>=0.1.0
+livekit-plugins-openai>=0.1.0
+livekit-plugins-turn-detector>=0.1.0
+
+# --- Speech-to-text: faster-whisper (wraps CTranslate2 + Whisper) ---
+faster-whisper>=1.0.0
+
+# --- Text-to-speech: Piper (English + Spanish) ---
+# piper-tts provides the Python wrapper; voices are downloaded separately
+piper-tts>=1.2.0
+
+# --- Text-to-speech: Coqui XTTS-v2 (Hindi fallback) ---
+# Heavy dependency (~2GB model). Comment out if not needed.
+TTS>=0.22.0
+
+# --- Audio I/O ---
+sounddevice>=0.4.6
+numpy>=1.24.0
+scipy>=1.10.0
+soundfile>=0.12.1
+
+# --- Utilities ---
+python-dotenv>=1.0.0
+httpx>=0.24.0
+
+# --- Dev / testing ---
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific
+.env
+models/
+*.onnx
+*.pt
+*.bin
+*.gguf
+voices/
+piper_voices/
+*.wav
+*.mp3
+*.ogg
+*.flac
+venv/
+.venv/
