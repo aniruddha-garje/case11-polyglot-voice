@@ -43,11 +43,8 @@ echo.
 echo [4/7] Installing Python dependencies (this may take 5-15 minutes)...
 echo       Note: TTS (Coqui XTTS-v2) is large. Grab a coffee.
 pip install -r requirements.txt
-if errorlevel 1 (
-    echo.
-    echo [WARN] Some packages may have failed. Check output above.
-    echo        Common fix: pip install torch --index-url https://download.pytorch.org/whl/cpu
-)
+echo.
+echo [INFO] pip install finished. Any errors above are listed per-package.
 
 REM --- Copy .env ---
 echo.

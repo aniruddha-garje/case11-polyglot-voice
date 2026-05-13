@@ -19,8 +19,11 @@ faster-whisper>=1.0.0
 piper-tts>=1.2.0
 
 # --- Text-to-speech: Coqui XTTS-v2 (Hindi fallback) ---
-# Heavy dependency (~2GB model). Comment out if not needed.
-TTS>=0.22.0
+# NOTE: The original Coqui 'TTS' package was removed from PyPI.
+# Use the maintained fork instead. Install manually if needed:
+#   pip install coqui-tts
+# For now we use pyttsx3 (Windows SAPI) as the Hindi fallback.
+pyttsx3>=2.90
 
 # --- Audio I/O ---
 sounddevice>=0.4.6

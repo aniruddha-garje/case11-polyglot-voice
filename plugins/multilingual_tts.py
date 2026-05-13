@@ -1,15 +1,19 @@
 """
 Multilingual TTS plugin — routes to the right TTS backend per language.
 
-Language routing:
-    en → Piper (en_US-lessac-medium)   ~150-250ms on CPU
-    es → Piper (es_ES-carlfm-x_low)    ~150-250ms on CPU
-    hi → XTTS-v2 (Coqui TTS)          ~4000-8000ms on CPU (ecosystem limitation)
+livekit-agents 1.5.x API:
+  - Inherits from tts.TTS
+  - Must implement: synthesize(text, *, conn_options) -> ChunkedStream
+  - ChunkedStream subclass must implement: async _run(output_emitter)
+  - output_emitter.initialize() → push(pcm_bytes) → flush()
 
-Inherits from livekit.agents.tts.TTS (non-streaming mode).
+Language routing:
+    en → Piper (en_US-lessac-medium)   ~150-250ms
+    es → Piper (es_ES-carlfm-x_low)    ~150-250ms
+    hi → pyttsx3 Windows SAPI          ~100ms (lower quality)
 """
 
-import io
+import asyncio
 import logging
 import os
 import time
@@ -17,19 +21,19 @@ from typing import Optional
 
 import numpy as np
 from livekit.agents import tts, utils
+from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
 
 logger = logging.getLogger("multilingual_tts")
 
-# Sample rate Piper outputs (22050 Hz), resampled to 24000 for XTTS
-PIPER_SAMPLE_RATE = 22050
-XTTS_SAMPLE_RATE = 24000
-LIVEKIT_SAMPLE_RATE = 24000  # LiveKit expects 24kHz PCM
+# LiveKit expects 24kHz PCM from TTS
+OUTPUT_SAMPLE_RATE = 24000
+PIPER_SAMPLE_RATE = 22050   # Piper outputs at 22050 Hz
 
 
 class MultilingualTTS(tts.TTS):
     """
-    Language-aware TTS that routes synthesis to the appropriate backend.
-    Language is set externally by the agent after STT detects the user's language.
+    Language-aware TTS router.
+    Language is set via set_language() after each STT result.
     """
 
     def __init__(
@@ -38,11 +42,10 @@ class MultilingualTTS(tts.TTS):
         language_router=None,
         latency_tracker=None,
         voices_dir: str = "voices",
-        hindi_backend: Optional[str] = None,
     ):
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False),
-            sample_rate=LIVEKIT_SAMPLE_RATE,
+            sample_rate=OUTPUT_SAMPLE_RATE,
             num_channels=1,
         )
         self._language_router = language_router
@@ -50,186 +53,176 @@ class MultilingualTTS(tts.TTS):
         self._voices_dir = voices_dir
         self._current_lang = "en"
 
-        # Resolve Hindi backend from env or constructor arg
-        self._hindi_backend = hindi_backend or os.getenv("TTS_HINDI_BACKEND", "xtts-v2")
-
-        # Lazy-load backends to avoid import errors if a package isn't installed
         self._piper_en = None
         self._piper_es = None
-        self._xtts = None
         self._pyttsx3_engine = None
 
-        self._init_backends()
+        self._load_backends()
 
-    def _init_backends(self):
-        """Initialize TTS backends. Log clearly if a backend fails."""
-        # --- Piper (EN) ---
+    def _load_backends(self):
+        """Load TTS backends at init. Failures are logged, not raised."""
+        # --- Piper EN ---
         try:
             from piper.voice import PiperVoice
-            en_model = os.path.join(self._voices_dir, "en_US-lessac-medium.onnx")
-            if os.path.exists(en_model):
-                self._piper_en = PiperVoice.load(en_model)
-                logger.info("[TTS] Piper EN loaded successfully.")
+            en_path = os.path.join(self._voices_dir, "en_US-lessac-medium.onnx")
+            if os.path.exists(en_path):
+                self._piper_en = PiperVoice.load(en_path)
+                logger.info("[TTS] Piper EN loaded.")
             else:
-                logger.warning(f"[TTS] Piper EN voice not found at {en_model}. Run setup.bat to download.")
-        except ImportError:
-            logger.warning("[TTS] piper-tts not installed. EN TTS unavailable.")
+                logger.warning(f"[TTS] Piper EN not found at '{en_path}'. Run: curl commands in README.")
+        except Exception as e:
+            logger.warning(f"[TTS] Piper EN failed to load: {e}")
 
-        # --- Piper (ES) ---
+        # --- Piper ES ---
         try:
             from piper.voice import PiperVoice
-            es_model = os.path.join(self._voices_dir, "es_ES-carlfm-x_low.onnx")
-            if os.path.exists(es_model):
-                self._piper_es = PiperVoice.load(es_model)
-                logger.info("[TTS] Piper ES loaded successfully.")
+            es_path = os.path.join(self._voices_dir, "es_ES-carlfm-x_low.onnx")
+            if os.path.exists(es_path):
+                self._piper_es = PiperVoice.load(es_path)
+                logger.info("[TTS] Piper ES loaded.")
             else:
-                logger.warning(f"[TTS] Piper ES voice not found at {es_model}. Run setup.bat to download.")
-        except ImportError:
-            logger.warning("[TTS] piper-tts not installed. ES TTS unavailable.")
+                logger.warning(f"[TTS] Piper ES not found at '{es_path}'.")
+        except Exception as e:
+            logger.warning(f"[TTS] Piper ES failed to load: {e}")
 
-        # --- Hindi TTS backend ---
-        if self._hindi_backend == "xtts-v2":
-            try:
-                from TTS.api import TTS as CoquiTTS
-                self._xtts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=False)
-                logger.info("[TTS] Coqui XTTS-v2 loaded for Hindi.")
-            except ImportError:
-                logger.warning("[TTS] TTS (Coqui) not installed. Falling back to pyttsx3 for Hindi.")
-                self._init_pyttsx3()
-            except Exception as e:
-                logger.warning(f"[TTS] XTTS-v2 init failed ({e}). Falling back to pyttsx3.")
-                self._init_pyttsx3()
-        else:
-            self._init_pyttsx3()
-
-    def _init_pyttsx3(self):
-        """Fallback: Windows SAPI TTS via pyttsx3."""
+        # --- pyttsx3 for Hindi (Windows SAPI fallback) ---
         try:
             import pyttsx3
             self._pyttsx3_engine = pyttsx3.init()
-            logger.info("[TTS] pyttsx3 (Windows SAPI) initialized as Hindi fallback.")
+            logger.info("[TTS] pyttsx3 (Windows SAPI) loaded for Hindi.")
         except Exception as e:
-            logger.error(f"[TTS] pyttsx3 init failed: {e}. Hindi TTS will be unavailable.")
+            logger.warning(f"[TTS] pyttsx3 failed to init: {e}. Hindi TTS unavailable.")
 
     def set_language(self, lang: str):
-        """Called by the agent after each STT result to switch the TTS voice."""
+        """Called by the agent after each STT event to switch TTS language."""
         if lang != self._current_lang:
             logger.info(f"[TTS] Language switch: {self._current_lang} → {lang}")
         self._current_lang = lang
 
-    async def _synthesize_impl(self, text: str) -> tts.SynthesizedAudio:
-        """
-        Synthesize text to audio using the appropriate backend for the current language.
-        Returns a SynthesizedAudio containing raw PCM frames.
-        """
-        lang = self._current_lang
-        t_start = time.perf_counter_ns()
-        if self._latency_tracker:
-            self._latency_tracker.start("tts")
-
-        logger.info(f"[TTS] Synthesizing in '{lang}' | Text: '{text[:60]}{'...' if len(text) > 60 else ''}'")
-
-        try:
-            if lang == "hi":
-                audio_data, sample_rate = await self._synthesize_hindi(text)
-            elif lang == "es":
-                audio_data, sample_rate = await self._synthesize_piper(text, "es")
-            else:
-                # Default to English for unknown languages
-                audio_data, sample_rate = await self._synthesize_piper(text, "en")
-        except Exception as e:
-            logger.error(f"[TTS] Synthesis failed for lang={lang}: {e}. Returning silence.")
-            audio_data = np.zeros(LIVEKIT_SAMPLE_RATE, dtype=np.float32)
-            sample_rate = LIVEKIT_SAMPLE_RATE
-
-        elapsed_ms = (time.perf_counter_ns() - t_start) / 1_000_000
-        if self._latency_tracker:
-            self._latency_tracker.end("tts")
-        logger.info(f"[TTS] Synthesis complete | Latency: {elapsed_ms:.1f}ms")
-
-        # Resample to LiveKit's expected sample rate if needed
-        if sample_rate != LIVEKIT_SAMPLE_RATE:
-            audio_data = self._resample(audio_data, sample_rate, LIVEKIT_SAMPLE_RATE)
-
-        # Convert float32 → int16 PCM
-        pcm = (audio_data * 32767).astype(np.int16).tobytes()
-
-        return tts.SynthesizedAudio(
-            request_id=utils.shortuuid(),
-            frame=agents.AudioFrame(
-                data=pcm,
-                sample_rate=LIVEKIT_SAMPLE_RATE,
-                num_channels=1,
-                samples_per_channel=len(audio_data),
-            ),
+    def synthesize(
+        self,
+        text: str,
+        *,
+        conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+    ) -> "MultilingualChunkedStream":
+        return MultilingualChunkedStream(
+            tts=self,
+            input_text=text,
+            conn_options=conn_options,
+            lang=self._current_lang,
+            latency_tracker=self._latency_tracker,
         )
 
-    async def _synthesize_piper(self, text: str, lang: str):
-        """Synthesize using Piper. Returns (numpy_float32_array, sample_rate)."""
-        import asyncio
+    def synthesize_piper(self, text: str, lang: str) -> bytes:
+        """Synchronous Piper synthesis. Returns raw int16 PCM bytes at PIPER_SAMPLE_RATE."""
         voice = self._piper_en if lang == "en" else self._piper_es
         if voice is None:
-            raise RuntimeError(f"Piper voice for '{lang}' not loaded.")
+            raise RuntimeError(f"Piper voice for '{lang}' not available.")
 
-        # Piper is synchronous; run in executor to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        audio_bytes = await loop.run_in_executor(None, self._piper_synthesize_sync, voice, text)
-        audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        return audio_data, PIPER_SAMPLE_RATE
+        pcm_parts = []
+        for chunk in voice.synthesize(text):
+            # chunk.audio_float_array is float32 [-1, 1] at chunk.sample_rate
+            pcm = (chunk.audio_float_array * 32767).astype(np.int16)
+            pcm_parts.append(pcm.tobytes())
+        return b"".join(pcm_parts)
 
-    def _piper_synthesize_sync(self, voice, text: str) -> bytes:
-        """Synchronous Piper synthesis — called from executor."""
-        buf = io.BytesIO()
-        # Piper writes 16-bit PCM to a file-like object
-        voice.synthesize(text, buf, sentence_silence=0.0)
-        return buf.getvalue()
-
-    async def _synthesize_hindi(self, text: str):
-        """Synthesize Hindi using XTTS-v2 or pyttsx3 fallback."""
-        import asyncio
-
-        if self._xtts is not None:
-            loop = asyncio.get_event_loop()
-            audio_data = await loop.run_in_executor(None, self._xtts_synthesize_sync, text)
-            return audio_data, XTTS_SAMPLE_RATE
-        elif self._pyttsx3_engine is not None:
-            loop = asyncio.get_event_loop()
-            audio_data = await loop.run_in_executor(None, self._pyttsx3_synthesize_sync, text)
-            return audio_data, LIVEKIT_SAMPLE_RATE
-        else:
-            raise RuntimeError("No Hindi TTS backend available.")
-
-    def _xtts_synthesize_sync(self, text: str) -> np.ndarray:
-        """Synchronous XTTS-v2 synthesis — called from executor."""
-        # XTTS-v2 returns a list of samples at 24kHz
-        wav = self._xtts.tts(text=text, language="hi")
-        return np.array(wav, dtype=np.float32)
-
-    def _pyttsx3_synthesize_sync(self, text: str) -> np.ndarray:
+    def synthesize_hindi(self, text: str) -> tuple[bytes, int]:
         """
-        Synchronous pyttsx3 synthesis — saves to temp WAV then reads back.
-        This is a last-resort fallback with limited quality.
+        Synchronous Hindi synthesis via pyttsx3 (Windows SAPI).
+        Returns (pcm_bytes, sample_rate).
         """
         import tempfile
         import soundfile as sf
 
+        if self._pyttsx3_engine is None:
+            raise RuntimeError("pyttsx3 not available for Hindi TTS.")
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
 
-        self._pyttsx3_engine.save_to_file(text, tmp_path)
-        self._pyttsx3_engine.runAndWait()
+        try:
+            self._pyttsx3_engine.save_to_file(text, tmp_path)
+            self._pyttsx3_engine.runAndWait()
+            audio, sr = sf.read(tmp_path, dtype="float32")
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            pcm = (audio * 32767).astype(np.int16).tobytes()
+            return pcm, sr
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
-        audio_data, sr = sf.read(tmp_path, dtype="float32")
-        os.unlink(tmp_path)
 
-        # Convert stereo to mono if needed
-        if audio_data.ndim > 1:
-            audio_data = audio_data.mean(axis=1)
-        return audio_data
+class MultilingualChunkedStream(tts.ChunkedStream):
+    """ChunkedStream implementation for MultilingualTTS."""
 
-    def _resample(self, audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
-        """Simple linear resampling using scipy."""
-        from scipy.signal import resample_poly
+    def __init__(self, *, tts: MultilingualTTS, input_text: str,
+                 conn_options: APIConnectOptions, lang: str, latency_tracker=None):
+        super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
+        self._lang = lang
+        self._latency_tracker = latency_tracker
+        self._multilingual_tts = tts  # typed reference for mypy
+
+    async def _run(self, output_emitter) -> None:
+        """Synthesize and push audio to LiveKit's output emitter."""
+        lang = self._lang
+        text = self._input_text
+        t0 = time.perf_counter_ns()
+
+        if self._latency_tracker:
+            self._latency_tracker.start("tts")
+
+        logger.info(f"[TTS] Synthesizing [{lang}]: '{text[:60]}{'...' if len(text)>60 else ''}'")
+
+        output_emitter.initialize(
+            request_id=utils.shortuuid(),
+            sample_rate=OUTPUT_SAMPLE_RATE,
+            num_channels=1,
+            mime_type="audio/pcm",
+        )
+
+        loop = asyncio.get_event_loop()
+
+        try:
+            if lang in ("en", "es"):
+                # Piper: synchronous, run in thread to avoid blocking event loop
+                pcm_bytes = await loop.run_in_executor(
+                    None, self._multilingual_tts.synthesize_piper, text, lang
+                )
+                # Piper outputs at 22050Hz; resample to 24000Hz for LiveKit
+                pcm_bytes = self._resample_pcm(pcm_bytes, PIPER_SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
+            else:
+                # Hindi: pyttsx3 via Windows SAPI
+                pcm_bytes, sr = await loop.run_in_executor(
+                    None, self._multilingual_tts.synthesize_hindi, text
+                )
+                if sr != OUTPUT_SAMPLE_RATE:
+                    pcm_bytes = self._resample_pcm(pcm_bytes, sr, OUTPUT_SAMPLE_RATE)
+
+            output_emitter.push(pcm_bytes)
+
+        except Exception as e:
+            logger.error(f"[TTS] Synthesis failed for lang={lang}: {e}")
+            # Push 500ms of silence so pipeline doesn't stall
+            silence = bytes(OUTPUT_SAMPLE_RATE * 2 // 2)  # 500ms, 2 bytes/sample
+            output_emitter.push(silence)
+
+        output_emitter.flush()
+
+        elapsed_ms = (time.perf_counter_ns() - t0) / 1_000_000
+        if self._latency_tracker:
+            self._latency_tracker.end("tts")
+        logger.info(f"[TTS] Done [{lang}] | {elapsed_ms:.0f}ms")
+
+    def _resample_pcm(self, pcm_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
+        """Resample int16 PCM bytes from one sample rate to another."""
+        if from_rate == to_rate:
+            return pcm_bytes
         from math import gcd
+        from scipy.signal import resample_poly
+        audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         g = gcd(from_rate, to_rate)
-        return resample_poly(audio, to_rate // g, from_rate // g).astype(np.float32)
+        resampled = resample_poly(audio, to_rate // g, from_rate // g)
+        return (resampled * 32767).astype(np.int16).tobytes()
