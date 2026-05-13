@@ -83,9 +83,16 @@ if not exist "voices\es_ES-carlfm-x_low.onnx" (
     echo       Spanish voice already downloaded.
 )
 
+REM --- Download turn detector model ---
+echo.
+echo [7/8] Downloading turn detector model (lk_end_of_utterance_multilingual)...
+echo       This downloads ~50MB from HuggingFace into the local cache.
+python agent.py download-files
+echo.
+
 REM --- Remind about Ollama ---
 echo.
-echo [7/7] Ollama setup reminder...
+echo [8/8] Ollama setup reminder...
 echo       Make sure Ollama is installed and the model is pulled:
 echo.
 echo         ollama pull qwen2.5:1.5b

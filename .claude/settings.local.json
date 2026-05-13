@@ -6,7 +6,10 @@
       "Bash(git commit:*)",
       "Bash(xargs grep:*)",
       "Bash(pip install:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
