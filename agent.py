@@ -19,6 +19,7 @@ import os
 from dotenv import load_dotenv
 from livekit.agents import Agent, AgentSession, JobContext, TurnHandlingOptions, WorkerOptions, cli, llm
 from livekit.plugins import openai, silero
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from plugins.language_router import LanguageRouter
 from plugins.multilingual_tts import MultilingualTTS
@@ -86,15 +87,19 @@ async def entrypoint(ctx: JobContext):
         llm=ollama_llm,
         tts=multilingual_tts,
         turn_handling=TurnHandlingOptions(
+            # MultilingualModel: ML-based end-of-utterance detection (EN/HI/ES).
+            # Runs the lk_end_of_utterance_multilingual inference locally.
+            # Much more accurate than pure silence-based VAD for turn detection.
+            turn_detection=MultilingualModel(),
             endpointing={
-                "min_delay": 0.8,   # wait at least 800ms of silence before ending turn
-                "max_delay": 6.0,   # don't wait more than 6s (handles long pauses mid-sentence)
+                "min_delay": 0.5,   # ML model handles most cases; this is a safety floor
+                "max_delay": 6.0,   # don't wait more than 6s for a turn to end
             },
             interruption={
                 "enabled": True,
-                "min_duration": 1.0,    # need at least 1s of speech to interrupt
-                "min_words": 2,         # need at least 2 words (reduces noise triggers)
-                "false_interruption_timeout": 3.0,  # 3s before classifying as false interrupt
+                "min_duration": 1.0,    # need at least 1s of speech to count as interruption
+                "min_words": 2,         # need at least 2 words (reduces noise/cough triggers)
+                "false_interruption_timeout": 3.0,
             },
         ),
     )
